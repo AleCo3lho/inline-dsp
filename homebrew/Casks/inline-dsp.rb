@@ -7,7 +7,7 @@ cask "inline-dsp" do
   desc "Menu bar broadcast vocal chain for your microphone"
   homepage "https://github.com/AleCo3lho/inline-dsp"
 
-  depends_on macos: ">= :sonoma"
+  depends_on macos: :sonoma
 
   app "InlineDSP.app"
 

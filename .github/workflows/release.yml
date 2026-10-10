@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-26
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Get version
+      id: version
+      run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+    - name: Check tag matches the app version
+      run: |
+        PLIST_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Sources/InlineDSP/Info.plist)
+        if [ "$PLIST_VERSION" != "${{ steps.version.outputs.version }}" ]; then
+          echo "::error::Tag v${{ steps.version.outputs.version }} does not match Info.plist version $PLIST_VERSION"
+          exit 1
+        fi
+
+    - name: Self-test
+      run: |
+        swift build -c release
+        "$(swift build -c release --show-bin-path)/inline-dsp" --self-test
+
+    - name: Build app
+      run: scripts/build-app.sh
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: |
+          dist/InlineDSP-${{ steps.version.outputs.version }}-macos.zip
+          dist/InlineDSP-${{ steps.version.outputs.version }}-macos.zip.sha256
+        draft: false
+        prerelease: false
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-tap:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+    - name: Update Homebrew tap
+      env:
+        TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        VERSION: ${{ needs.build.outputs.version }}
+      run: |
+        if [ -z "$TAP_GITHUB_TOKEN" ]; then
+          echo "::warning::TAP_GITHUB_TOKEN is not set; update AleCo3lho/homebrew-inline-dsp by hand"
+          exit 0
+        fi
+
+        curl -sfL "https://github.com/AleCo3lho/inline-dsp/releases/download/v${VERSION}/InlineDSP-${VERSION}-macos.zip" -o app.zip
+        APP_SHA=$(sha256sum app.zip | awk '{print $1}')
+
+        git clone "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/AleCo3lho/homebrew-inline-dsp.git"
+        cd homebrew-inline-dsp
+
+        # Update cask: version and sha256
+        sed -i 's/version ".*"/version "'"${VERSION}"'"/' Casks/inline-dsp.rb
+        sed -i 's/sha256 ".*"/sha256 "'"${APP_SHA}"'"/' Casks/inline-dsp.rb
+
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add -A
+        git commit -m "Update inline-dsp to v${VERSION}"
+        git push

@@ -1,5 +1,8 @@
 # InlineDSP
 
+[![CI](https://github.com/AleCo3lho/inline-dsp/actions/workflows/ci.yml/badge.svg)](https://github.com/AleCo3lho/inline-dsp/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/AleCo3lho/inline-dsp)](https://github.com/AleCo3lho/inline-dsp/releases/latest)
+
 **A broadcast vocal chain for your Mac's menu bar.** InlineDSP takes the mic channel from your
 audio interface, runs it through a broadcast-style processing chain, and outputs a clean stereo
 signal to a virtual audio cable. Any call or streaming app can then use that cable as its
@@ -42,7 +45,7 @@ mic ─► mono → stereo ─► high-pass 80 Hz ─► gate / compressor ─�
 ### Homebrew
 
 ```sh
-brew install --cask aleco3lho/tap/inline-dsp
+brew install --cask aleco3lho/inline-dsp/inline-dsp
 brew install --cask vb-cable          # if you don't have a virtual cable yet (or: blackhole-2ch)
 ```
 

@@ -1,5 +1,5 @@
 cask "inline-dsp" do
-  version "1.0.0"
+  version "1.1.0"
   sha256 :no_check # the published copy in AleCo3lho/homebrew-inline-dsp pins the release checksum
 
   url "https://github.com/AleCo3lho/inline-dsp/releases/download/v#{version}/InlineDSP-#{version}-macos.zip"

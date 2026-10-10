@@ -129,12 +129,17 @@ private struct ControlPanel: View {
     private var meters: some View {
         VStack(alignment: .leading, spacing: 8) {
             LevelMeter(title: "Input", level: engine.meters.inputPeakDB,
-                       marker: engine.settings.expansionThresholdDB)
+                       marker: engine.settings.gateThresholdDB)
             LevelMeter(title: "Output", level: engine.meters.outputPeakDB, marker: nil)
+            // Gain change per stage, as attenuation in dB (0 = untouched).
             HStack {
-                Text("Gate/comp \(formatDB(engine.meters.dynamicsGainReductionDB)) dB")
+                Text("Gate \(formatDB(-engine.meters.gateDB))")
                 Spacer()
-                Text("De-ess \(formatDB(engine.meters.deEsserGainReductionDB)) dB")
+                Text("Comp \(formatDB(engine.meters.compressorDB))")
+                Spacer()
+                Text("De-ess \(formatDB(engine.meters.deEsserDB))")
+                Spacer()
+                Text("Limit \(formatDB(-engine.meters.limiterDB))")
             }
             .font(.caption.monospacedDigit())
             .foregroundStyle(.secondary)
@@ -143,12 +148,15 @@ private struct ControlPanel: View {
 
     private var sliders: some View {
         VStack(alignment: .leading, spacing: 12) {
-            ParameterSlider(title: "Expander threshold", value: $engine.settings.expansionThresholdDB, range: -90...(-20),
-                            hint: "Input below this is turned down. Lower it if your voice gets cut off.")
-            ParameterSlider(title: "Compressor headroom", value: $engine.settings.compressionHeadroomDB, range: 1...30,
-                            hint: "Smaller = firmer compression.")
+            ParameterSlider(title: "Gate threshold", value: $engine.settings.gateThresholdDB, range: -80...(-20),
+                            hint: "Below this the input is turned down by 15 dB. Keep it under your voice on the input meter.")
+            ParameterSlider(title: "Compressor threshold", value: $engine.settings.compressorThresholdDB, range: -50...(-6),
+                            hint: "Compression starts here. Lower = more of your voice is levelled.")
+            ParameterSlider(title: "Compressor ratio", value: $engine.settings.compressorRatio, range: 1...10,
+                            format: { String(format: "%.1f:1", $0) },
+                            hint: "How strongly levels above the threshold are reduced.")
             ParameterSlider(title: "De-esser threshold", value: $engine.settings.deEssThresholdDB, range: -60...0,
-                            hint: "Lower = more sibilance reduction above 4 kHz.")
+                            hint: "Lower = more sibilance reduction around 6.5 kHz.")
         }
     }
 }
@@ -174,6 +182,7 @@ private struct ParameterSlider: View {
     let title: String
     @Binding var value: Float
     let range: ClosedRange<Float>
+    var format: (Float) -> String = { "\(formatDB($0)) dB" }
     let hint: String
 
     var body: some View {
@@ -181,7 +190,7 @@ private struct ParameterSlider: View {
             HStack {
                 Text(title)
                 Spacer()
-                Text("\(formatDB(value)) dB").monospacedDigit().foregroundStyle(.secondary)
+                Text(format(value)).monospacedDigit().foregroundStyle(.secondary)
             }
             Slider(value: $value, in: range)
             Text(hint).font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)

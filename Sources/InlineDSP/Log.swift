@@ -28,7 +28,9 @@ enum Log {
 
 func formatDB(_ value: Float?, precision: Int = 1) -> String {
     guard let value, value.isFinite else { return "-inf" }
-    return String(format: "%.\(precision)f", value)
+    let text = String(format: "%.\(precision)f", value)
+    // "-0.0" (negative zero, or a tiny negative value rounded away) reads as a reduction.
+    return text.hasPrefix("-") && Double(text) == 0 ? String(text.dropFirst()) : text
 }
 
 func linearToDB(_ value: Float) -> Float {

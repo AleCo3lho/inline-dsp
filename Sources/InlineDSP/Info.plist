@@ -7,7 +7,7 @@
 	<key>CFBundleName</key>
 	<string>inline-dsp</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.0</string>
+	<string>1.1.0</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>inline-dsp captures your microphone to run it through a broadcast vocal processing chain.</string>
 </dict>

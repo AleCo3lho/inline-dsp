@@ -9,7 +9,7 @@ signal to a virtual audio cable. Any call or streaming app can then use that cab
 microphone.
 
 <p align="center">
-  <img src="docs/demo.gif" alt="InlineDSP menu bar panel: live meters, opening the gate with the expander slider, picking the output device, toggling the engine" width="340">
+  <img src="docs/demo.gif" alt="InlineDSP menu bar panel: live meters, tuning the gate with its slider, picking the output device, toggling the engine" width="340">
 </p>
 
 ```
@@ -18,9 +18,9 @@ mic ─► mono → stereo ─► high-pass 80 Hz ─► gate / compressor ─�
 
 ## Features
 
-- **Live tuning from the menu bar:** expander (gate) threshold, compressor headroom and
-  de-esser threshold, with input/output meters and gain-reduction readouts. The input meter
-  marks the gate threshold, so you can see whether your voice clears it.
+- **Live tuning from the menu bar:** gate threshold, compressor threshold and ratio, and
+  de-esser threshold, with input/output meters and per-stage gain readouts. The input meter
+  shows what the gate hears and marks its threshold, so you can see whether your voice clears it.
 - **Pick the input device, mic channel and output device.** Known interfaces select their XLR
   input automatically (for example *Input 2* on a Scarlett Solo 4th Gen).
 - **True stereo output:** the mono mic is copied to both channels, bit-identical, at 48 kHz /
@@ -28,8 +28,9 @@ mic ─► mono → stereo ─► high-pass 80 Hz ─► gate / compressor ─�
 - **Built for real calls:** the engine survives other apps reconfiguring audio devices
   mid-call (it rebuilds in about 0.3 s, with no device-list churn), recovers when a device is
   unplugged and plugged back in, and corrects clock drift between the interface and the cable.
-- **Low overhead:** about 0% CPU while idle in the menu bar, about 13 ms of processing
-  latency, and nothing beyond Apple's own audio units.
+- **Low latency, low overhead:** 1 ms of processing latency, from the limiter's lookahead
+  (everything else is zero-latency). About 0.5% CPU while running, in a small real-time-safe C
+  kernel.
 - **Headless mode** for the terminal or launchd, plus an offline `--self-test` that checks the
   DSP chain without any hardware.
 
@@ -72,9 +73,9 @@ click **Open Anyway**. Alternatively, run
    the **Output** cable. The engine starts automatically, and the switch turns it on and off.
 2. In Discord, Google Meet, Zoom, OBS or a similar app, choose the cable (e.g. *VB-Cable*) as
    the **microphone**.
-3. Speak and watch the meters. If quiet passages get cut, drag **Expander threshold** to the
-   left of where your voice peaks on the input meter. **Reset to defaults** restores the tuned
-   values.
+3. Speak and watch the meters. The gate turns the signal down 15 dB (never mutes it) when you
+   stop talking; if it cuts the ends of quiet words, drag **Gate threshold** to the left of
+   where your voice peaks on the input meter. **Reset to defaults** restores the tuned values.
 
 Your choices persist across launches.
 
@@ -135,15 +136,22 @@ The interface is the clock source and the cable is drift-compensated by Core Aud
 maps pick the mic channel on the way in and send L/R only to the cable on the way out, so
 nothing plays through your speakers or headphones.
 
-**Processing** uses Apple's audio units, with these measured behaviours:
+**Processing** runs in one in-process audio unit (`Sources/VoiceKernel`): a C kernel that
+processes the mono mic once and writes it to both channels. The kernel never allocates or
+locks on the audio thread, and slider changes reach it through atomics. Every figure below is
+checked by `--self-test`:
 
-| Stage | Unit | Notes |
+| Stage | Design | Measured |
 |---|---|---|
-| High-pass | `AVAudioUnitEQ` | 80 Hz, 12 dB/oct (−3 dB at 80 Hz, −17 dB at 30 Hz) |
-| Gate / compressor | AUDynamicsProcessor | No ratio parameter: output approaches *threshold + headroom*, so headroom acts as the ratio control |
-| Tone EQ | `AVAudioUnitEQ` | −3 dB wide cut at 350 Hz, +3 dB shelf at 5 kHz |
-| De-esser | AUMultibandCompressor | Only the top band (≥ 4 kHz) compresses. The unit's crossovers don't sum flat (stock layout notches about 6 dB near 1 kHz), so the lower crossovers are parked below 22 Hz, measured flat within 0.25 dB below 4 kHz |
-| Limiter | AUPeakLimiter | Fixed 0 dBFS ceiling; +1.5 dB pre-gain and −1.5 dB trim give a true −1.5 dBFS ceiling |
+| High-pass | 12 dB/oct Butterworth, 80 Hz | −3.0 dB at 80 Hz, −17 dB at 30 Hz, 0.00 dB at 1 kHz |
+| Gate | Peak detector after the high-pass; 6 dB hysteresis, 150 ms hold, closes to a **range** (−15 dB) instead of muting | −15.0 dB closed, 0.00 dB open |
+| Compressor | Feed-forward, log domain, 6 dB soft knee, real **ratio** (3:1), 5 ms / 120 ms, no lookahead | 2.93:1 for 3:1, unity below the knee |
+| Tone EQ | −3 dB bell at 350 Hz (≈1.5 oct), +3 dB shelf at 5 kHz | — |
+| De-esser | Band-pass at 6.5 kHz feeding a dynamic cut of that band only. It triggers when the band is loud **and** within 9 dB of the full-band level, so vowels don't set it off | −6 dB on a hot 6 kHz tone; **0.00 dB** change at 100 Hz–2.5 kHz |
+| Limiter | 1 ms lookahead, sliding-minimum gain with a moving-average release, which mathematically guarantees the ceiling | exactly −1.500 dBFS on +18 dBFS transients |
+
+With every stage bypassed the output equals the input sample for sample, delayed by 47 samples
+(0.98 ms at 48 kHz).
 
 **Device changes.** When a call starts, the calling app may reconfigure audio devices, and
 AVAudioEngine stops itself in response. InlineDSP waits for the change to settle, then builds a

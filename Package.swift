@@ -9,9 +9,13 @@ let package = Package(
     ],
     targets: [
         .target(name: "ObjCExceptionCatcher"),
+        .target(
+            name: "VoiceKernel",
+            linkerSettings: [.linkedFramework("AudioToolbox"), .linkedFramework("AVFAudio")]
+        ),
         .executableTarget(
             name: "InlineDSP",
-            dependencies: ["ObjCExceptionCatcher"],
+            dependencies: ["ObjCExceptionCatcher", "VoiceKernel"],
             exclude: ["Info.plist"],
             linkerSettings: [
                 .linkedFramework("AVFAudio"),

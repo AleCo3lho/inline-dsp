@@ -3,6 +3,7 @@ import Foundation
 
 /// Renders synthetic signals through the exact production chain (same `DSPChain.install`) in
 /// offline manual-rendering mode, so the routing and DSP can be verified without any hardware.
+/// Stages are isolated by toggling them in `DSPSettings`, so each check measures one stage.
 enum SelfTest {
     private static let rate = BroadcastFormat.sampleRate
 
@@ -15,13 +16,34 @@ enum SelfTest {
 
         print("Self-test: offline render through the production chain at \(Int(rate)) Hz")
         do {
-            // 1. Mono -> stereo upmix must be bit-identical on both sides, at unity gain.
+            // 1. Mono -> stereo upmix must be bit-identical on both sides.
             let upmix = try render(sine(1_000, dBFS: -36, seconds: 1), settings: settings)
             let difference = zip(upmix.left, upmix.right).reduce(Float(0)) { max($0, abs($1.0 - $1.1)) }
             verdict(difference == 0 && upmix.peak(.all) > 0, "Upmix L == R",
                     "max |L - R| = \(difference), output peak \(formatDB(linearToDB(upmix.peak(.all)))) dBFS")
 
-            // 2. Ceiling: hot sines, a hot transient after silence, and broadband noise.
+            // 2. Latency and transparency: with every stage bypassed the output must be the input,
+            //    sample for sample, delayed by exactly the latency the audio unit reports.
+            var bypassed = settings
+            bypassed.bypass = true
+            let probe = noise(dBFS: -20, seconds: 0.5)
+            let through = try render(probe, settings: bypassed)
+            let delay = through.reportedLatencySamples
+            var error: Float = 0
+            for index in 0..<(probe.count - delay) {
+                error = max(error, abs(through.left[index + delay] - probe[index]))
+            }
+            verdict(error == 0 && delay > 0, "Bypass is bit-exact",
+                    "output == input delayed \(delay) samples, max error \(error)")
+            let impulse = [Float](repeating: 0, count: 1_000) + [0.5] + [Float](repeating: 0, count: 2_000)
+            let response = try render(impulse, settings: bypassed)
+            let measured = response.left.indices.max { abs(response.left[$0]) < abs(response.left[$1]) }! - 1_000
+            let latencyMs = Double(measured) / rate * 1_000
+            verdict(measured == delay && latencyMs <= 1.1, "Processing latency",
+                    String(format: "%d samples = %.2f ms (reported %d)", measured, latencyMs, delay))
+
+            // 3. Ceiling: hot sines, a hot transient after silence, broadband noise. The limiter's
+            //    lookahead makes this a guarantee, so the tolerance is float rounding only.
             let ceilingSignals: [(String, [Float])] = [
                 ("1 kHz @ +12 dBFS", sine(1_000, dBFS: 12, seconds: 1.5)),
                 ("6 kHz @ +6 dBFS", sine(6_000, dBFS: 6, seconds: 1.5)),
@@ -30,38 +52,60 @@ enum SelfTest {
             ]
             for (name, signal) in ceilingSignals {
                 let peak = linearToDB(try render(signal, settings: settings).peak(.all))
-                verdict(peak <= settings.limiterCeilingDB + 0.01, "Ceiling, \(name)",
+                verdict(peak <= settings.limiterCeilingDB + 0.001, "Ceiling, \(name)",
                         "peak \(formatDB(peak, precision: 3)) dBFS (limit \(formatDB(settings.limiterCeilingDB)) dBFS)")
             }
 
-            // 3/4. Each node's own contribution: render with the node bypassed vs. active, at a
-            //      level where the compressor is linear so dynamics don't skew the comparison.
-            func contribution(of node: (DSPChain) -> AVAudioUnitEffect, _ frequency: Double, dBFS: Double) throws -> Float {
+            /// Level change a stage causes: the chain with the stage on vs off.
+            func contribution(_ stage: WritableKeyPath<DSPSettings, Bool>, base: DSPSettings = settings,
+                              _ frequency: Double, dBFS: Double) throws -> Float {
                 let signal = sine(frequency, dBFS: dBFS, seconds: 1.5)
-                let active = try render(signal, settings: settings).rmsDB(.tail)
-                let bypassed = try render(signal, settings: settings) { node($0).bypass = true }.rmsDB(.tail)
-                return active - bypassed
+                var off = base
+                off[keyPath: stage] = false
+                return try render(signal, settings: base).rmsDB(.tail) - render(signal, settings: off).rmsDB(.tail)
             }
 
+            // 4. High-pass: 12 dB/oct Butterworth at the cutoff.
             let cutoff = Double(settings.highPassCutoffHz)
-            let rumble = try contribution(of: { $0.highPass }, 30, dBFS: -36)
-            let atCutoff = try contribution(of: { $0.highPass }, cutoff, dBFS: -36)
-            let voice = try contribution(of: { $0.highPass }, 1_000, dBFS: -36)
-            verdict(rumble <= -12 && abs(atCutoff + 3) <= 1 && abs(voice) <= 0.5, "High-pass",
+            let rumble = try contribution(\.highPassEnabled, 30, dBFS: -36)
+            let atCutoff = try contribution(\.highPassEnabled, cutoff, dBFS: -36)
+            let voice = try contribution(\.highPassEnabled, 1_000, dBFS: -36)
+            verdict(rumble <= -12 && abs(atCutoff + 3) <= 0.5 && abs(voice) <= 0.1, "High-pass",
                     "30 Hz \(formatDB(rumble)) dB, \(Int(cutoff)) Hz \(formatDB(atCutoff)) dB, 1 kHz \(formatDB(voice, precision: 2)) dB")
 
-            let sibilance = try contribution(of: { $0.deEsser }, 6_000, dBFS: -12)
+            // 5. Gate alone: closes to its range below threshold - hysteresis, untouched above.
+            var gateOnly = settings
+            (gateOnly.compressorEnabled, gateOnly.toneEnabled, gateOnly.deEsserEnabled, gateOnly.limiterEnabled) = (false, false, false, false)
+            let closed = try contribution(\.gateEnabled, base: gateOnly, 1_000, dBFS: Double(settings.gateThresholdDB - settings.gateHysteresisDB - 14))
+            let open = try contribution(\.gateEnabled, base: gateOnly, 1_000, dBFS: Double(settings.gateThresholdDB + 20))
+            verdict(abs(closed - settings.gateRangeDB) <= 0.5 && abs(open) <= 0.05, "Gate",
+                    "closed \(formatDB(closed)) dB (range \(formatDB(settings.gateRangeDB))), open \(formatDB(open, precision: 2)) dB")
+
+            // 6. Compressor alone (no makeup): unity below the knee, the set ratio above it.
+            var compOnly = gateOnly
+            (compOnly.gateEnabled, compOnly.compressorEnabled, compOnly.makeupGainDB) = (false, true, 0)
+            func outputPeak(_ dBFS: Double) throws -> Float {
+                try render(sine(1_000, dBFS: dBFS, seconds: 1.5), settings: compOnly).peakDB(.tail)
+            }
+            let quiet = try outputPeak(Double(settings.compressorThresholdDB - 15)) - (settings.compressorThresholdDB - 15)
+            let ratio = 12 / (try outputPeak(0) - outputPeak(-12))
+            verdict(abs(quiet) <= 0.1 && abs(ratio - settings.compressorRatio) <= 0.25, "Compressor",
+                    String(format: "below threshold %+.2f dB, measured ratio %.2f:1 (set %.1f:1)", quiet, ratio, settings.compressorRatio))
+
+            // 7. De-esser: cuts the sibilance band, leaves everything else exactly alone.
+            let sibilance = try contribution(\.deEsserEnabled, 6_000, dBFS: -12)
             verdict(sibilance <= -3, "De-esser on 6 kHz", "\(formatDB(sibilance)) dB")
             for frequency in [100.0, 500.0, 1_000.0, 2_500.0] {
-                let change = try contribution(of: { $0.deEsser }, frequency, dBFS: -12)
-                verdict(abs(change) <= 0.25, "De-esser transparent at \(Int(frequency)) Hz", "\(formatDB(change, precision: 2)) dB")
+                let change = try contribution(\.deEsserEnabled, frequency, dBFS: -12)
+                verdict(abs(change) <= 0.05, "De-esser transparent at \(Int(frequency)) Hz", "\(formatDB(change, precision: 2)) dB")
             }
 
-            // 5. Informational: static level response at 1 kHz, for gain-staging the placeholders.
+            // 8. Informational: static level response of the full chain at 1 kHz.
             print("  Level response at 1 kHz (input -> output peak, dBFS):")
-            for level in stride(from: -60.0, through: 0, by: 12) {
+            for level in stride(from: -72.0, through: 0, by: 12) {
                 let output = try render(sine(1_000, dBFS: level, seconds: 1.5), settings: settings)
-                print("    \(String(format: "%6.1f", level)) -> \(String(format: "%6.1f", output.peakDB(.tail)))   (dyn GR \(formatDB(output.dynamicsGR)) dB)")
+                print(String(format: "    %6.1f -> %6.1f   (gate %@ dB, comp %@ dB, limiter %@ dB)", level, output.peakDB(.tail),
+                             formatDB(output.gateDB), formatDB(output.compressorDB), formatDB(output.limiterDB)))
             }
         } catch {
             failures += 1
@@ -78,8 +122,11 @@ enum SelfTest {
         enum Region { case all, tail }
         let left: [Float]
         let right: [Float]
-        /// Read while the engine is still running; the AU resets its meters on stop.
-        let dynamicsGR: Float?
+        let reportedLatencySamples: Int
+        // Read while the engine is still running (last render block).
+        let gateDB: Float
+        let compressorDB: Float
+        let limiterDB: Float
 
         /// The last 0.5 s, after attack/release and filter transients have settled.
         private func samples(_ region: Region) -> ArraySlice<Float> {
@@ -118,8 +165,7 @@ enum SelfTest {
         }
     }
 
-    private static func render(_ signal: [Float], settings: DSPSettings,
-                               configure: (DSPChain) -> Void = { _ in }) throws -> Rendered {
+    private static func render(_ signal: [Float], settings: DSPSettings) throws -> Rendered {
         let maxFrames: AVAudioFrameCount = 1_024
         let engine = AVAudioEngine()
         try engine.enableManualRenderingMode(.offline, format: BroadcastFormat.graph, maximumFrameCount: maxFrames)
@@ -131,7 +177,6 @@ enum SelfTest {
         }
 
         let chain = try DSPChain(settings: settings)
-        configure(chain)
         try chain.install(in: engine, captureFormat: mono)
         engine.connect(engine.mainMixerNode, to: engine.outputNode, format: BroadcastFormat.graph)
         try engine.start()
@@ -150,7 +195,10 @@ enum SelfTest {
             left += UnsafeBufferPointer(start: buffer.floatChannelData![0], count: count)
             right += UnsafeBufferPointer(start: buffer.floatChannelData![1], count: count)
         }
-        return Rendered(left: left, right: right, dynamicsGR: chain.dynamicsGainReductionDB)
+        return Rendered(left: left, right: right,
+                        reportedLatencySamples: Int((chain.processorNode.latency * rate).rounded()),
+                        gateDB: chain.gateGainDB, compressorDB: chain.compressorReductionDB,
+                        limiterDB: chain.limiterGainDB)
     }
 
     // MARK: Signals

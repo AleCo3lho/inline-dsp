@@ -49,8 +49,11 @@ final class BroadcastEngine {
     struct Meters: Equatable {
         var inputPeakDB = -Float.infinity
         var outputPeakDB = -Float.infinity
-        var dynamicsGainReductionDB: Float = 0
-        var deEsserGainReductionDB: Float = 0
+        /// Gate attenuation and limiter gain (<= 0); compressor and de-esser reduction (>= 0).
+        var gateDB: Float = 0
+        var compressorDB: Float = 0
+        var deEsserDB: Float = 0
+        var limiterDB: Float = 0
     }
 
     // MARK: Observable state
@@ -102,7 +105,7 @@ final class BroadcastEngine {
             guard settings != oldValue else { return }
             Preferences.settings = settings
             guard let chain = session?.chain else { return }
-            do { try chain.apply(settings) } catch { report("Applying DSP settings failed: \(error)") }
+            chain.apply(settings)
         }
     }
 
@@ -143,15 +146,15 @@ final class BroadcastEngine {
             self.channel = channel
         }
 
-        /// Input meter sits on the upmix (raw mic level, before the gate); output meter on the
-        /// ceiling trim (what the virtual driver receives).
+        /// Input meter sits on the capture (raw mic level, before any processing); output meter
+        /// on the main mixer (what the virtual driver receives).
         func installMeters() {
-            inputMeter.install(on: chain.upmix)
+            inputMeter.install(on: engine.inputNode)
             outputMeter.install(on: engine.mainMixerNode)
         }
 
         func removeMeters() {
-            chain.upmix.removeTap(onBus: 0)
+            engine.inputNode.removeTap(onBus: 0)
             engine.mainMixerNode.removeTap(onBus: 0)
         }
     }
@@ -651,10 +654,14 @@ final class BroadcastEngine {
             return
         }
         meters = Meters(
-            inputPeakDB: linearToDB(session.inputMeter.drain(.ui).max() ?? 0),
+            // The panel's input meter shows what the gate hears (after the high-pass), so its
+            // threshold marker is directly comparable; the raw capture is in the status log.
+            inputPeakDB: session.chain.takeDetectorPeakDB(),
             outputPeakDB: linearToDB(session.outputMeter.drain(.ui).max() ?? 0),
-            dynamicsGainReductionDB: session.chain.dynamicsGainReductionDB ?? 0,
-            deEsserGainReductionDB: session.chain.deEsserGainReductionDB ?? 0
+            gateDB: session.chain.gateGainDB,
+            compressorDB: session.chain.compressorReductionDB,
+            deEsserDB: session.chain.deEsserReductionDB,
+            limiterDB: session.chain.limiterGainDB
         )
     }
 
@@ -680,8 +687,10 @@ final class BroadcastEngine {
             "Status: \(session.engine.isRunning ? "running" : "NOT RUNNING")",
             "uptime \(Self.duration(Date().timeIntervalSince(runningSince)))",
             "in peak \(input) dBFS",
-            "dyn GR \(formatDB(session.chain.dynamicsGainReductionDB)) dB",
-            "de-ess GR \(formatDB(session.chain.deEsserGainReductionDB)) dB",
+            "gate \(formatDB(session.chain.gateGainDB)) dB",
+            "comp GR \(formatDB(session.chain.compressorReductionDB)) dB",
+            "de-ess GR \(formatDB(session.chain.deEsserReductionDB)) dB",
+            "limiter \(formatDB(session.chain.limiterGainDB)) dB",
             "out peak L \(output[0]) / R \(output[1]) dBFS",
             "overloads \(overloads)",
         ].joined(separator: " | "))
@@ -695,7 +704,7 @@ final class BroadcastEngine {
         let ioLatency = engine.inputNode.presentationLatency + engine.outputNode.presentationLatency
         Log.info("Clock:   \"\(session.input.name)\" drives a private aggregate (id \(session.aggregateID)); \"\(session.output.name)\" is drift-compensated")
         Log.info("Capture: \(engine.inputNode.outputFormat(forBus: 0))")
-        Log.info("Graph:   \(BroadcastFormat.graph) [HPF -> Dyn -> ToneEQ -> DeEss -> Limiter]")
+        Log.info("Graph:   voice processor [HPF -> gate -> compressor -> tone EQ -> de-esser -> limiter] -> stereo upmix")
         Log.info("Output:  \(engine.outputNode.inputFormat(forBus: 0))")
         Log.info(String(format: "Latency: I/O %.1f ms + DSP %.1f ms (requested buffer %u frames = %.1f ms @ %.0f Hz)",
                         ioLatency * 1000, dspLatency * 1000, options.bufferFrames,

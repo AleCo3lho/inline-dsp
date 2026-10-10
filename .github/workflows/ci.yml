@@ -19,4 +19,5 @@ jobs:
         run: swift build -c release
 
       - name: Self-test (offline DSP checks, no audio hardware needed)
-        run: "$(swift build -c release --show-bin-path)/inline-dsp" --self-test
+        run: |
+          "$(swift build -c release --show-bin-path)/inline-dsp" --self-test
